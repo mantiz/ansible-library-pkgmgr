@@ -1,0 +1,188 @@
+#!/usr/bin/python
+
+import platform
+
+class PackageManager(object):
+    pkg_mgr = None
+    error = False
+    msgs = []
+    changed = False
+
+    def __new__(cls, *args, **kwargs):
+        subclass = None
+
+        pkg_mgr = Facts().facts['pkg_mgr']
+        if pkg_mgr != 'unknown':
+            for sc in cls.__subclasses__():
+                if sc.pkg_mgr == pkg_mgr:
+                    subclass = sc
+
+        if subclass is None:
+            subclass = cls
+
+        return super(cls, subclass).__new__(subclass)
+
+    def __init__(self, module):
+        if self.pkg_mgr is None:
+            self.fail(msg = "Unknown package manager")
+
+        self.module         = module
+        self.facts          = ansible_facts(module)
+        self.pkg            = module.params['pkg']
+        self.state          = module.params['state']
+        self.update_cache   = module.params['update_cache']
+        self.nodeps         = module.params['nodeps']
+        self.force          = module.params['force']
+        self.changed        = False
+
+        # normalize state value
+        if self.state == 'installed':
+            self.state = 'present'
+        if self.state == 'removed':
+            self.state = 'absent'
+
+    def update_package_db(self):
+        if self.module.check_mode:
+            self.changed = True
+            return True
+
+        rc, stdout, stderr = self.run_update_package_db()
+
+        if rc == 0:
+            self.changed = True
+            return True
+
+        return False
+
+    def query(self):
+        rc, stdout, stderr = self.run_query(self.pkg)
+
+        if rc == 0:
+            return True
+
+        return False
+
+    def install(self):
+        if self.query():
+            return True
+
+        if self.module.check_mode:
+            self.changed = True
+            return True
+
+        rc, stdout, stderr = self.run_install(self.pkg)
+
+        if rc == 0:
+            self.changed = True
+            return True
+
+        self.error = True
+        self.msgs.append("Unable to install '%s'" % self.pkg)
+        return False
+
+    def uninstall(self):
+        if not self.query():
+            return True
+
+        if self.module.check_mode:
+            self.changed = True
+            return True
+
+        rc, stdout, stderr = self.run_uninstall(self.pkg)
+
+        if rc == 0:
+            self.changed = True
+            return True
+
+        self.error = True
+        self.msgs.append("Unable to uninstall '%s'" % self.pkg)
+        return False
+
+    def fail(self, msg = ""):
+        self.module.fail_json(changed = self.changed, msg = msg)
+
+    def exit(self, msg = ""):
+        self.module.exit_json(changed = self.changed, msg = msg)
+
+    def run_update_package_db(self):
+        self.fail(msg = "update_cache not supported for package manager '%s'" % self.pkg_mgr)
+
+    def run_query(self, pkg):
+        self.fail(msg = "query not supported for package manager '%s'" % self.pkg_mgr)
+
+    def run_install(self, pkg):
+        self.fail(msg = "install not supported for package manager '%s'" % self.pkg_mgr)
+
+    def run_uninstall(self, pkg):
+        self.fail(msg = "uninstall not supported for package manager '%s'" % self.pkg_mgr)
+
+class Pacman(PackageManager):
+    pkg_mgr = 'pacman'
+
+    def run_update_package_db(self):
+        return self.module.run_command("pacman -Sy", check_rc = False)
+
+    def run_query(self, pkg):
+        return self.module.run_command("pacman -Q %s" % (pkg), check_rc = False)
+
+    def run_install(self, pkg):
+        return self.module.run_command("pacman -S %s --noconfirm" % (pkg), check_rc = False)
+
+    def run_uninstall(self, pkg):
+        args = "R"
+        if self.module.params['nodeps']:
+            args += "d"
+        if self.module.params['force']:
+            args += "d"
+        return self.module.run_command("pacman -%s %s --noconfirm" % (args, pkg), check_rc = False)
+
+class Apt(PackageManager):
+    pkg_mgr = 'apt'
+
+    def run_update_package_db(self):
+        return self.module.run_command("apt-get update", check_rc = False)
+
+    def run_query(self, pkg):
+        return self.module.run_command("dpkg-query -s %s" % (pkg), check_rc = False)
+
+    def run_install(self, pkg):
+        return self.module.run_command("apt-get install -y %s" % (pkg), check_rc = False)
+
+    def run_uninstall(self, pkg):
+        return self.module.run_command("apt-get remove -y %s" % (pkg), check_rc = False)
+
+def main():
+    global module
+    module = AnsibleModule(
+        argument_spec = dict(
+            pkg = dict(aliases = ['name', 'package']),
+            state = dict(default = 'present', choices = ['present', 'installed', 'absent', 'removed']),
+            recurse = dict(default = 'no', choices = BOOLEANS, type = 'bool'),
+            update_cache = dict(aliases = ['update-cache'], choices = BOOLEANS, type = 'bool'),
+            force = dict(default = 'no', choices = BOOLEANS, type = 'bool'),
+            nodeps = dict(default = 'no', choices = BOOLEANS, type = 'bool'),
+        ),
+        required_one_of = [['pkg', 'update_cache']],
+        supports_check_mode = True,
+    )
+
+    pkgMgr = PackageManager(module = module)
+
+    if pkgMgr.update_cache:
+        pkgMgr.update_package_db()
+
+    if pkgMgr.pkg:
+        if pkgMgr.state == 'present':
+            pkgMgr.install()
+        elif pkgMgr.state == 'absent':
+            pkgMgr.uninstall()
+
+    if pkgMgr.error:
+        pkgMgr.fail(msg = ", ".join(pkgMgr.msgs))
+
+    pkgMgr.exit(msg = ", ".join(pkgMgr.msgs))
+
+# import module snippets
+from ansible.module_utils.basic import *
+from ansible.module_utils.facts import *
+main()
